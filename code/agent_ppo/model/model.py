@@ -56,6 +56,37 @@ class Model(nn.Module):
         fc_concat_dim_list = [self.feature_dim, 256, 256]
         self.concat_mlp = MLP(fc_concat_dim_list, "concat_mlp", non_linearity_last=True)
 
+        # ---------------------自注意力模块--------------------
+        self.use_self_attn = bool(getattr(Config, "USE_SELF_ATTENTION", True))
+        sa_tokens  = int(getattr(Config, "SA_TOKENS", 4))   # T
+        sa_dim     = int(getattr(Config, "SA_DIM", 64))     # D（需要 T * D == 256）
+        sa_heads   = int(getattr(Config, "SA_HEADS", 4))
+        sa_layers  = int(getattr(Config, "SA_LAYERS", 2))
+        sa_dropout = float(getattr(Config, "SA_DROPOUT", 0.0))
+
+        # 防止错误
+        assert sa_tokens * sa_dim == 256, f"Self-Attn shape mismatch: {sa_tokens} * {sa_dim} != 256"
+
+        # 将 256 维共享表征“打散”为 T 个 token（每个 D 维）
+        self.attn_token_proj = nn.Linear(256, sa_tokens * sa_dim)
+
+        # Transformer 编码层
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=sa_dim,
+            nhead=sa_heads,
+            dim_feedforward=sa_dim * 4,
+            dropout=sa_dropout,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.attn_encoder = nn.TransformerEncoder(encoder_layer, num_layers=sa_layers)
+
+        # 将编码后的 pooled 表征映回 256，并做 LayerNorm 残差融合
+        self.attn_out_proj = nn.Linear(sa_dim, 256)
+        self.attn_ln = nn.LayerNorm(256)
+        # --------------------------------------------------
+
+
         self.lstm = torch.nn.LSTM(
             input_size=self.lstm_unit_size,
             hidden_size=self.lstm_unit_size,
@@ -92,6 +123,16 @@ class Model(nn.Module):
         # public concat
         # 公共连接层
         fc_public_result = self.concat_mlp(feature_vec)
+
+        if self.use_self_attn:
+            B = fc_public_result.size(0)
+            # 256 → T*D → [B, T, D]
+            tokens = self.attn_token_proj(fc_public_result).view(B, -1, int(getattr(Config, "SA_DIM", 64)))
+            # 轻量 Transformer 编码
+            tokens = self.attn_encoder(tokens)             # [B, T, D]
+            pooled = tokens.mean(dim=1)                    # [B, D] 平均池化
+            attn_feat = self.attn_out_proj(pooled)         # [B, 256]
+            fc_public_result = self.attn_ln(fc_public_result + attn_feat)  # 残差 + LN 保稳
 
         # output label
         # 输出标签
