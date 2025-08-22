@@ -122,3 +122,15 @@ class Config:
     # The input dimension of samples on the learner from Reverb varies depending on the algorithm used.
     # learner上reverb样本的输入维度, 注意不同的算法维度不一样
     SAMPLE_DIM = sum(DATA_SPLIT_SHAPE[:-2]) * LSTM_TIME_STEPS + sum(DATA_SPLIT_SHAPE[-2:])
+
+    # 自注意力参数
+    USE_SELF_ATTENTION = True   # 开关
+    SA_TOKENS = 4               # 虚拟token数T
+    SA_DIM = 64                 # 每个token维度D，需满足 T * D == 256
+    SA_HEADS = 4                # Multi-Head
+    SA_LAYERS = 2               # Transformer Encoder 层数
+    SA_DROPOUT = 0.0            # 注意力/FFN dropout
+
+    # Dual_ppo
+    USE_DUAL_CLIP_PPO = True
+    DUAL_CLIP_C = 2.0

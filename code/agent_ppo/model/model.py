@@ -38,6 +38,8 @@ class Model(nn.Module):
         self.is_reinforce_task_list = Config.IS_REINFORCE_TASK_LIST
         self.min_policy = Config.MIN_POLICY
         self.clip_param = Config.CLIP_PARAM
+        self.use_dual_clip_ppo = bool(getattr(Config, 'USE_DUAL_CLIP_PPO', True))
+        self.dual_clip_c = float(getattr(Config, 'DUAL_CLIP_C', 2.0))
         self.restore_list = []
         self.var_beta = self.m_var_beta
         self.learning_rate = self.m_learning_rate
@@ -130,7 +132,7 @@ class Model(nn.Module):
             tokens = self.attn_token_proj(fc_public_result).view(B, -1, int(getattr(Config, "SA_DIM", 64)))
             # 轻量 Transformer 编码
             tokens = self.attn_encoder(tokens)             # [B, T, D]
-            pooled = tokens.mean(dim=1)                    # [B, D] 平均池化
+            pooled = tokens.mean(dim=1)                    # [B, D]
             attn_feat = self.attn_out_proj(pooled)         # [B, 256]
             fc_public_result = self.attn_ln(fc_public_result + attn_feat)  # 残差 + LN 保稳
 
@@ -269,10 +271,15 @@ class Model(nn.Module):
 
                 surr1 = clip_ratio * advantage
                 surr2 = ratio.clamp(1.0 - self.clip_param, 1.0 + self.clip_param) * advantage
+                ppo_objective = torch.minimum(surr1, surr2)
+                if self.use_dual_clip_ppo:
+                    dual_clip_objective = self.dual_clip_c * advantage
+                    surrogate = torch.where(advantage >= 0, ppo_objective, torch.maximum(ppo_objective, dual_clip_objective))
+                else:
+                    surrogate = ppo_objective
                 temp_policy_loss = -torch.sum(
-                    torch.minimum(surr1, surr2) * (weight_list[task_index].float()) * 1
+                    surrogate * (weight_list[task_index].float()) * 1
                 ) / torch.maximum(torch.sum((weight_list[task_index].float()) * 1), torch.tensor(1.0))
-
                 self.policy_cost = self.policy_cost + temp_policy_loss
 
         # cross entropy loss
