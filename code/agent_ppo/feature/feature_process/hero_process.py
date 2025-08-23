@@ -21,8 +21,6 @@ class HeroProcess:
         self.main_camp = camp
         self.main_camp_hero_dict = {}
         self.enemy_camp_hero_dict = {}
-        self.main_camp_hero_dict = {}
-        self.enemy_camp_hero_dict = {}
         self.transform_camp2_to_camp1 = camp == "PLAYERCAMP_2"
         self.get_hero_config()
         self.map_feature_to_norm = self.normalizer.parse_config(self.hero_feature_config)
@@ -60,8 +58,8 @@ class HeroProcess:
         # Generate hero features for our camp
         # 生成我方阵营的英雄特征
         main_camp_hero_vector_feature = self.generate_one_type_hero_feature(self.main_camp_hero_dict, "main_camp")
-
-        return main_camp_hero_vector_feature
+        enemy_vec = self.generate_one_type_hero_feature(self.enemy_camp_hero_dict, "enemy_camp")
+        return main_camp_hero_vector_feature + enemy_vec
 
     def generate_hero_info_list(self, frame_state):
         self.main_camp_hero_dict.clear()
@@ -146,3 +144,100 @@ class HeroProcess:
         if self.transform_camp2_to_camp1 and value != 100000:
             value = 0 - value
         vector_feature.append(value)
+
+
+
+    # 新加入特征
+    def get_forward_x(self, hero, out, feature_name):
+        fx = hero.get("actor_state", {}).get("forward", {}).get("x", 0.0)
+        fz = hero.get("actor_state", {}).get("forward", {}).get("z", 0.0)
+        denom = math.sqrt(fx * fx + fz * fz) + 1e-8
+        val = fx / denom
+        if self.transform_camp2_to_camp1:
+            val = -val
+        out.append(float(val))  # ∈[-1,1]，INI 用 min_max:-1:1
+
+    def get_forward_z(self, hero, out, feature_name):
+        fx = hero.get("actor_state", {}).get("forward", {}).get("x", 0.0)
+        fz = hero.get("actor_state", {}).get("forward", {}).get("z", 0.0)
+        denom = math.sqrt(fx * fx + fz * fz) + 1e-8
+        val = fz / denom
+        if self.transform_camp2_to_camp1:
+            val = -val
+        out.append(float(val))  # ∈[-1,1]
+
+    # ========== 比例/标量 ==========
+    def get_hp_rate(self, hero, out, feature_name):
+        st = hero.get("actor_state", {})
+        hp = float(st.get("hp", 0.0))
+        max_hp = float(st.get("max_hp", 1.0))
+        out.append(0.0 if max_hp <= 0 else hp / max_hp)
+
+    def get_ep_rate(self, hero, out, feature_name):
+        vals = hero.get("actor_state", {}).get("values", {})
+        ep = float(vals.get("ep", 0.0))
+        max_ep = float(vals.get("max_ep", 1.0))
+        out.append(0.0 if max_ep <= 0 else ep / max_ep)
+
+    def get_level(self, hero, out, feature_name):
+        out.append(float(hero.get("level", 0)))
+
+    def get_money(self, hero, out, feature_name):
+        out.append(float(hero.get("money", 0)))
+
+    def get_attack_range(self, hero, out, feature_name):
+        out.append(float(hero.get("actor_state", {}).get("attack_range", 0)))
+
+    # ========== 核心属性（ActorValue） ==========
+    def _get_val(self, hero, key, default=0.0):
+        return float(hero.get("actor_state", {}).get("values", {}).get(key, default))
+
+    def get_phy_atk(self, hero, out, feature_name): out.append(self._get_val(hero, "phy_atk"))
+    def get_phy_def(self, hero, out, feature_name): out.append(self._get_val(hero, "phy_def"))
+    def get_mgc_atk(self, hero, out, feature_name): out.append(self._get_val(hero, "mgc_atk"))
+    def get_mgc_def(self, hero, out, feature_name): out.append(self._get_val(hero, "mgc_def"))
+    def get_mov_spd(self, hero, out, feature_name): out.append(self._get_val(hero, "mov_spd"))
+    def get_atk_spd(self, hero, out, feature_name): out.append(self._get_val(hero, "atk_spd"))
+    def get_crit_rate(self, hero, out, feature_name): out.append(self._get_val(hero, "crit_rate"))
+    def get_crit_effe(self, hero, out, feature_name): out.append(self._get_val(hero, "crit_effe"))
+    def get_phy_armor_hurt(self, hero, out, feature_name): out.append(self._get_val(hero, "phy_armor_hurt"))
+    def get_mgc_armor_hurt(self, hero, out, feature_name): out.append(self._get_val(hero, "mgc_armor_hurt"))
+    def get_phy_vamp(self, hero, out, feature_name): out.append(self._get_val(hero, "phy_vamp"))
+    def get_mgc_vamp(self, hero, out, feature_name): out.append(self._get_val(hero, "mgc_vamp"))
+    def get_cd_reduce(self, hero, out, feature_name): out.append(self._get_val(hero, "cd_reduce"))
+    def get_ctrl_reduce(self, hero, out, feature_name): out.append(self._get_val(hero, "ctrl_reduce"))
+
+    # ========== 技能：前 4 个槽（含召唤师技能） ==========
+    def _get_slot(self, hero, idx):
+        slots = hero.get("skill_state", {}).get("slot_states", [])
+        if 0 <= idx < len(slots):
+            return slots[idx]
+        return None
+
+    def get_skill_cd_rate(self, hero, out, feature_name):
+        # 特征名形如：skill0_cd_rate / skill1_cd_rate / skill2_cd_rate / skill3_cd_rate
+        # 从特征名尾部解析索引
+        idx = int(''.join([c for c in feature_name if c.isdigit()]) or 0)
+        slot = self._get_slot(hero, idx)
+        if not slot:
+            out.append(0.0); return
+        cd = float(slot.get("cooldown", 0.0))
+        cd_max = float(slot.get("cooldown_max", 0.0))
+        rate = 0.0 if cd_max <= 0 else (cd / cd_max)
+        out.append(rate)  # 0~1
+
+    def get_skill_usable(self, hero, out, feature_name):
+        idx = int(''.join([c for c in feature_name if c.isdigit()]) or 0)
+        slot = self._get_slot(hero, idx)
+        usable = slot.get("usable", False) if slot else False
+        out.append(1.0 if usable else 0.0)
+
+    # ========== 其它语义 ==========
+    def get_is_in_grass(self, hero, out, feature_name):
+        out.append(1.0 if hero.get("isInGrass", False) else 0.0)
+
+    def get_kill_cnt(self, hero, out, feature_name):
+        out.append(float(hero.get("killCnt", 0)))
+
+    def get_dead_cnt(self, hero, out, feature_name):
+        out.append(float(hero.get("deadCnt", 0)))
