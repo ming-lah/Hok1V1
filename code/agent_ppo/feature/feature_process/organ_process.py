@@ -345,12 +345,14 @@ class OrganProcess:
 
 
     def _encode_events_and_grass(self, frame_state):
-        """
-        输出 3 维：[ally_dead_flag, enemy_dead_flag, grass_engage_flag]
-        grass_engage_flag = 我在草，敌不在草，且距离<5000
-        """
         ally_dead = 0.0
         enemy_dead = 0.0
+
+        # —— 事件列表兜底，保证 list[dict] —— 
+        acts = frame_state.get("frame_action", []) or []
+        if not isinstance(acts, list):
+            acts = []
+        acts = [a for a in acts if isinstance(a, dict)]
 
         # 敌方阵营（内联）
         if self.main_camp == "PLAYERCAMP_1":
@@ -365,8 +367,10 @@ class OrganProcess:
             enemy_camp = "PLAYERCAMP_2"
 
         # 本帧死亡事件（直接等值比较）
-        for act in frame_state.get("frame_action", []) or []:
+        for act in acts:
             da = act.get("dead_action") or {}
+            if not isinstance(da, dict):  # 再兜一下
+                continue
             death = (da.get("death") or {}).get("camp", None)
             if death is None:
                 continue
@@ -375,12 +379,16 @@ class OrganProcess:
             elif death == enemy_camp:
                 enemy_dead = 1.0
 
-        # 英雄对象
+        # 英雄对象（己方优先用 generate_hero_info_list 生成的，敌方从 frame_state 找）
         ally_h = getattr(self, "main_hero_info", None)
+        if not isinstance(ally_h, dict):
+            ally_h = None
+
         enemy_h = None
-        if not enemy_h:
-            for h in frame_state.get("hero_states", []) or []:
-                if (h.get("actor_state") or {}).get("camp") == enemy_camp:
+        hs = frame_state.get("hero_states", []) or []
+        if isinstance(hs, list):
+            for h in hs:
+                if isinstance(h, dict) and (h.get("actor_state") or {}).get("camp") == enemy_camp:
                     enemy_h = h
                     break
 
@@ -389,7 +397,7 @@ class OrganProcess:
             me_in = 1 if (ally_h.get("isInGrass") or (ally_h.get("actor_state") or {}).get("isInGrass")) else 0
             en_in = 1 if (enemy_h.get("isInGrass") or (enemy_h.get("actor_state") or {}).get("isInGrass")) else 0
             if me_in and not en_in:
-                x, az = self._pos(ally_h.get("actor_state") or {})
+                ax, az = self._pos(ally_h.get("actor_state") or {})   # ← 修正变量名
                 ex, ez = self._pos(enemy_h.get("actor_state") or {})
                 if math.hypot(ax - ex, az - ez) <= 5000.0:
                     grass_engage = 1.0
