@@ -94,6 +94,8 @@ class GameRewardManager:
             hero_camp = hero["actor_state"]["camp"]
             if hero_camp == camp:
                 main_hero = hero
+            else:
+                enemy_hero = hero
 
         # Get both defense towers
         # 获取双方防御塔
@@ -112,17 +114,18 @@ class GameRewardManager:
                     enemy_tower = organ
                 elif organ_subtype == "ACTOR_SUB_CRYSTAL":
                     enemy_spring = organ
-    # 工具函数
-    def _pos(o):
-        try:
-            if not isinstance(o, dict):
+        
+        # 工具函数
+        def _pos(o):
+            try:
+                if not isinstance(o, dict):
+                    return 0.0, 0.0
+                loc = o.get("location") or {}
+                x = float(loc.get("x", 0.0))
+                z = float(loc.get("z", 0.0))
+                return x, z
+            except Exception:
                 return 0.0, 0.0
-            loc = o.get("location")
-            x = loc.get("x", 0.0), 0.0
-            z = loc.get("z", 0.0), 0.0
-            return x, z
-        except Exception:
-            return 0.0, 0.0
 
         
         def _hp_ratio(u):
@@ -132,6 +135,9 @@ class GameRewardManager:
             mx = float(u.get("max_hp", 0.0))
             return hp / mx if mx > 0 else 0.0
 
+        enemy_camp = None
+        if enemy_hero:
+            eenemy_camp = (enemy_hero.get("actor_state") or {}).get("camp")
         A = [n for n in npc_list if n.get("sub_type") == "ACTOR_SUB_SOLDIER" and n.get("camp") == camp and n.get("hp", 0) > 0]
         E = [n for n in npc_list if n.get("sub_type") == "ACTOR_SUB_SOLDIER" and n.get("camp") == enemy_camp and n.get("hp", 0) > 0]
         
@@ -251,10 +257,13 @@ class GameRewardManager:
         )
         forward_value = 0
         dist_hero2emy = math.dist(hero_pos, enemy_tower_pos)
-        dist_main2emy = math.dist(main_tower_pos, enemy_tower_pos)
-        if main_hero["actor_state"]["hp"] / main_hero["actor_state"]["max_hp"] > 0.99 and dist_hero2emy > dist_main2emy:
-            forward_value = (dist_main2emy - dist_hero2emy) / dist_main2emy
-        return forward_value
+        dist_main2emy = max(math.dist(main_tower_pos, enemy_tower_pos), 1e-6)
+        base = (dist_main2emy - dist_hero2emy) / dist_main2emy
+        base = max(0.0, base)  # 远离敌塔不奖励
+        hp = float(main_hero["actor_state"]["hp"])
+        mx = max(float(main_hero["actor_state"]["max_hp"]), 1.0)
+        hp_scale = hp / mx
+        return base * hp_scale  # 或者直接 return base
 
     # Calculate the reward item information for both sides using frame data
     # 用帧数据来计算两边的奖励子项信息

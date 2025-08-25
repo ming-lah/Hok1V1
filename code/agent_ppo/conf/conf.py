@@ -12,8 +12,18 @@ class GameConfig:
     # Set the weight of each reward item and use it in reward_manager
     # 设置各个回报项的权重，在reward_manager中使用
     REWARD_WEIGHT_DICT = {
-        "tower_hp_point": 5.0,
-        "forward": 0.01,
+        "tower_hp_point": 3.0,
+        "forward": 0.05,
+        
+        "hero_hp_point": 0.8,     # （敌损血 - 我损血）的差分
+        "gold_point": 0.02,       # 经济增量差分（很小，防刷）
+        "minion_push_depth": 0.25,# 兵线推进深度差分（密集稳定）
+        "kill_event": 2.0,        # 击杀事件（帧级）
+        "death_event": -2.0,      # 阵亡事件（帧级，或也可不配此项）
+
+        "tower_danger": -0.4,     # 敌塔射程内/被塔锁（非零和，每帧）
+        "dive_no_minion": -0.4,   # 无兵越塔（非零和，每帧）
+        "grass_engage": 0.15,     # 我在草、敌不在草、且接近（非零和）
     }
     # Time decay factor, used in reward_manager
     # 时间衰减因子，在reward_manager中使用
