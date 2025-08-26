@@ -137,7 +137,7 @@ class GameRewardManager:
 
         enemy_camp = None
         if enemy_hero:
-            eenemy_camp = (enemy_hero.get("actor_state") or {}).get("camp")
+            enemy_camp = (enemy_hero.get("actor_state") or {}).get("camp")
         A = [n for n in npc_list if n.get("sub_type") == "ACTOR_SUB_SOLDIER" and n.get("camp") == camp and n.get("hp", 0) > 0]
         E = [n for n in npc_list if n.get("sub_type") == "ACTOR_SUB_SOLDIER" and n.get("camp") == enemy_camp and n.get("hp", 0) > 0]
         
@@ -178,13 +178,13 @@ class GameRewardManager:
         # --- 草丛埋伏（非零和） ---
         grass_engage = 0.0
         if main_hero and enemy_hero:
-            a_in = 1 if (main_hero.get("isInGrass") or (main_hero.get("actor_state") or {}).get("isInGrass")) else 0
-            e_in = 1 if (enemy_hero.get("isInGrass") or (enemy_hero.get("actor_state") or {}).get("isInGrass")) else 0
+            a_in = 0.1 if (main_hero.get("isInGrass") or (main_hero.get("actor_state") or {}).get("isInGrass")) else 0
+            e_in = 0.1 if (enemy_hero.get("isInGrass") or (enemy_hero.get("actor_state") or {}).get("isInGrass")) else 0
             if a_in and not e_in:
                 ax, az = _pos((main_hero.get("actor_state") or {}))
                 ex, ez = _pos((enemy_hero.get("actor_state") or {}))
                 if math.hypot(ax - ex, az - ez) <= 5000.0:
-                    grass_engage = 1.0
+                    grass_engage = 0.1
 
         # --- 事件：击杀/死亡（帧级） ---
         kill_event, death_event = 0.0, 0.0
@@ -199,9 +199,9 @@ class GameRewardManager:
                 death = (da.get("death") or {}).get("camp", None)
                 killer = (da.get("killer") or {}).get("camp", None)
                 if killer == camp:
-                    kill_event += 1.0
+                    kill_event += 10.0
                 if death == camp:
-                    death_event += 1.0
+                    death_event += 10.0
 
         # --- 经济（我方） ---
         gold_point = 0.0
@@ -274,6 +274,7 @@ class GameRewardManager:
             if hero["player_id"] == self.main_hero_player_id:
                 main_camp = hero["actor_state"]["camp"]
                 self.main_hero_camp = main_camp
+
             else:
                 enemy_camp = hero["actor_state"]["camp"]
         self.set_cur_calc_frame_vec(self.m_main_calc_frame_map, frame_data, main_camp)
