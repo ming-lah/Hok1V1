@@ -15,7 +15,7 @@ class GameConfig:
         "tower_hp_point": 3.0,
         "forward": 0.05,
         
-        "hero_hp_point": 0.8,     # （敌损血 - 我损血）的差分
+        "hero_hp_point": 1.5,     # （敌损血 - 我损血）的差分
         "gold_point": 0.02,       # 经济增量差分（很小，防刷）
         "minion_push_depth": 0.25,# 兵线推进深度差分（密集稳定）
         "kill_event": 2.0,        # 击杀事件（帧级）
@@ -36,7 +36,7 @@ class GameConfig:
 # Dimension configuration, used when building the model
 # 维度配置，构建模型时使用
 class DimConfig:
-    DIM_OF_FEATURE = [156]
+    DIM_OF_FEATURE = [190]
 
 
 # Configuration related to model and algorithms used
@@ -46,7 +46,7 @@ class Config:
     LSTM_TIME_STEPS = 16
     LSTM_UNIT_SIZE = 512
     DATA_SPLIT_SHAPE = [
-        156 + 85,
+        190 + 85,
         1,
         1,
         1,
@@ -71,7 +71,7 @@ class Config:
         LSTM_UNIT_SIZE,
         LSTM_UNIT_SIZE,
     ]
-    SERI_VEC_SPLIT_SHAPE = [(156,), (85,)]
+    SERI_VEC_SPLIT_SHAPE = [(190,), (85,)]
     INIT_LEARNING_RATE_START = 1e-3
     TARGET_LR = 1e-4
     TARGET_STEP = 5000
@@ -94,7 +94,7 @@ class Config:
     TARGET_EMBED_DIM = 32
 
     data_shapes = [
-        [(156 + 85) * 16],
+        [(190 + 85) * 16],
         [16],
         [16],
         [16],

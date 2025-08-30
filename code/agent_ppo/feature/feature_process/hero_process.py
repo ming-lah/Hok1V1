@@ -241,3 +241,176 @@ class HeroProcess:
 
     def get_dead_cnt(self, hero, out, feature_name):
         out.append(float(hero.get("deadCnt", 0)))
+    
+
+
+    # ===== 新增：对抗派生特征（仅英雄信息） =====
+    def _first_hero(self, hero_dict):
+        # 1v1：取字典里第一名英雄即可
+        return next(iter(hero_dict.values()), None)
+
+    def _pos_xz(self, actor_or_state: dict):
+        st = actor_or_state.get("actor_state", actor_or_state) or {}
+        loc = st.get("location", {}) or {}
+        return float(loc.get("x", 0.0)), float(loc.get("z", 0.0))
+
+    def _hp_rate_of(self, hero: dict) -> float:
+        st = hero.get("actor_state", {}) or {}
+        hp = float(st.get("hp", 0.0))
+        mx = float(st.get("max_hp", 1.0))
+        return 0.0 if mx <= 0 else (hp / mx)
+
+    def _atk_range_of(self, hero: dict) -> float:
+        st = hero.get("actor_state", {}) or {}
+        return float(st.get("attack_range", 0.0))
+
+    def get_dist_to_enemy(self, hero, out, feature_name):
+        # 依据 hero 阵营找到对面英雄，计算欧氏距离
+        my_camp = (hero.get("actor_state") or {}).get("camp")
+        if my_camp == self.main_camp:
+            opp = self._first_hero(self.enemy_camp_hero_dict)
+        else:
+            opp = self._first_hero(self.main_camp_hero_dict)
+        if not opp:
+            out.append(0.0); return
+        x1, z1 = self._pos_xz(hero)
+        x2, z2 = self._pos_xz(opp)
+        dist = math.hypot(x1 - x2, z1 - z2)  # 单位与坐标一致
+        out.append(float(dist))              # 归一化由 ini 的 min_max 完成
+
+    def get_in_my_atk_range(self, hero, out, feature_name):
+        my_camp = (hero.get("actor_state") or {}).get("camp")
+        if my_camp == self.main_camp:
+            opp = self._first_hero(self.enemy_camp_hero_dict)
+        else:
+            opp = self._first_hero(self.main_camp_hero_dict)
+        if not opp:
+            out.append(0.0); return
+        x1, z1 = self._pos_xz(hero)
+        x2, z2 = self._pos_xz(opp)
+        dist = math.hypot(x1 - x2, z1 - z2)
+        in_range = 1.0 if dist <= self._atk_range_of(hero) else 0.0
+        out.append(in_range)
+
+    def get_in_enemy_atk_range(self, hero, out, feature_name):
+        my_camp = (hero.get("actor_state") or {}).get("camp")
+        if my_camp == self.main_camp:
+            opp = self._first_hero(self.enemy_camp_hero_dict)
+        else:
+            opp = self._first_hero(self.main_camp_hero_dict)
+        if not opp:
+            out.append(0.0); return
+        x1, z1 = self._pos_xz(hero)
+        x2, z2 = self._pos_xz(opp)
+        dist = math.hypot(x1 - x2, z1 - z2)
+        in_enemy = 1.0 if dist <= self._atk_range_of(opp) else 0.0
+        out.append(in_enemy)
+
+    def get_hp_rate_diff(self, hero, out, feature_name):
+        my_camp = (hero.get("actor_state") or {}).get("camp")
+        if my_camp == self.main_camp:
+            opp = self._first_hero(self.enemy_camp_hero_dict)
+        else:
+            opp = self._first_hero(self.main_camp_hero_dict)
+        if not opp:
+            out.append(0.0); return
+        val = self._hp_rate_of(hero) - self._hp_rate_of(opp)  # ∈[-1,1]
+        out.append(float(val))
+
+
+    # ===== 新增：对抗增强特征（仅英雄字段） =====
+    def _first_hero(self, hero_dict):
+        return next(iter(hero_dict.values()), None)
+
+    def _pos_xz(self, actor_or_state: dict):
+        st = actor_or_state.get("actor_state", actor_or_state) or {}
+        loc = st.get("location", {}) or {}
+        return float(loc.get("x", 0.0)), float(loc.get("z", 0.0))
+
+    def _camp_index(self, camp_str: str) -> int:
+        # "PLAYERCAMP_1" -> 0,  "PLAYERCAMP_2" -> 1，兜底返回 0
+        if isinstance(camp_str, str) and camp_str.endswith("_2"):
+            return 1
+        return 0
+
+    def _hp_rate_of(self, hero: dict) -> float:
+        st = hero.get("actor_state", {}) or {}
+        hp = float(st.get("hp", 0.0)); mx = float(st.get("max_hp", 1.0))
+        return 0.0 if mx <= 0 else (hp / mx)
+
+    def _atk_range_of(self, hero: dict) -> float:
+        st = hero.get("actor_state", {}) or {}
+        return float(st.get("attack_range", 0.0))
+
+    def _forward_xz(self, hero: dict):
+        st = hero.get("actor_state", {}) or {}
+        fx = float((st.get("forward") or {}).get("x", 0.0))
+        fz = float((st.get("forward") or {}).get("z", 0.0))
+        # 单位化并考虑阵营镜像（与 get_forward_x/z 一致）
+        denom = math.sqrt(fx * fx + fz * fz) + 1e-8
+        fx /= denom; fz /= denom
+        if self.transform_camp2_to_camp1:
+            fx = -fx; fz = -fz
+        return fx, fz
+
+    def get_rel_dir_cos(self, hero, out, feature_name):
+        # 英雄面朝方向 与 指向敌人的向量 的余弦 ∈[-1,1]
+        my_camp = (hero.get("actor_state") or {}).get("camp")
+        opp = self._first_hero(self.enemy_camp_hero_dict if my_camp == self.main_camp else self.main_camp_hero_dict)
+        if not opp:
+            out.append(0.0); return
+        x1, z1 = self._pos_xz(hero); x2, z2 = self._pos_xz(opp)
+        dx, dz = (x2 - x1), (z2 - z1)
+        # 阵营镜像，与位置特征一致
+        if self.transform_camp2_to_camp1:
+            dx = -dx; dz = -dz
+        dist = math.hypot(dx, dz) + 1e-8
+        vx, vz = dx / dist, dz / dist
+        fx, fz = self._forward_xz(hero)
+        cos_val = fx * vx + fz * vz
+        out.append(float(max(-1.0, min(1.0, cos_val))))
+
+    def _get_slot(self, hero, idx):
+        slots = hero.get("skill_state", {}).get("slot_states", [])
+        if 0 <= idx < len(slots):
+            return slots[idx]
+        return None
+
+    def get_skill_usedTimes(self, hero, out, feature_name):
+        idx = int(''.join([c for c in feature_name if c.isdigit()]) or 0)
+        slot = self._get_slot(hero, idx)
+        used = int((slot or {}).get("usedTimes", 0))
+        out.append(float(used))
+
+    def get_skill_hit_rate(self, hero, out, feature_name):
+        idx = int(''.join([c for c in feature_name if c.isdigit()]) or 0)
+        slot = self._get_slot(hero, idx) or {}
+        used = int(slot.get("usedTimes", 0))
+        hit  = int(slot.get("hitHeroTimes", 0))
+        rate = 0.0 if used <= 0 else (hit / max(1, used))
+        out.append(float(max(0.0, min(1.0, rate))))
+
+    def get_hp_recover(self, hero, out, feature_name):
+        vals = (hero.get("actor_state") or {}).get("values", {}) or {}
+        out.append(float(vals.get("hp_recover", 0.0)))
+
+    def get_ep_recover(self, hero, out, feature_name):
+        vals = (hero.get("actor_state") or {}).get("values", {}) or {}
+        out.append(float(vals.get("ep_recover", 0.0)))
+
+    def get_visible_to_main_camp(self, hero, out, feature_name):
+        st = hero.get("actor_state", {}) or {}
+        visible = list(st.get("camp_visible", []) or [True, True])
+        idx = self._camp_index(self.main_camp)
+        out.append(1.0 if (idx < len(visible) and bool(visible[idx])) else 0.0)
+
+    def get_attack_target_is_enemy(self, hero, out, feature_name):
+        my_camp = (hero.get("actor_state") or {}).get("camp")
+        opp = self._first_hero(self.enemy_camp_hero_dict if my_camp == self.main_camp else self.main_camp_hero_dict)
+        if not opp:
+            out.append(0.0); return
+        st  = hero.get("actor_state", {}) or {}
+        tgt = int(st.get("attack_target", -1))
+        # runtime_id 更稳；若无则回退到 config_id
+        opp_id = int((opp.get("actor_state") or {}).get("runtime_id", (opp.get("actor_state") or {}).get("config_id", -9999)))
+        out.append(1.0 if tgt == opp_id and opp_id != -9999 else 0.0)
