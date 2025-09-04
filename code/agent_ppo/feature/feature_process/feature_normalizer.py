@@ -40,8 +40,8 @@ class FeatureNormalizer:
                 compare_method = parts[-1]
                 config_dict[feature_name] = (self.one_hot, values, compare_method)
             elif method == "min_max":
-                min_value = int(parts[2])
-                max_value = int(parts[3])
+                min_value = float(parts[2])
+                max_value = float(parts[3])
                 config_dict[feature_name] = (self.min_max, min_value, max_value)
             else:
                 raise ValueError("Unsupported method: " + method)

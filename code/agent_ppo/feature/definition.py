@@ -43,28 +43,52 @@ def sample_process(collector):
 def build_frame(agent, observation):
     obs_data, act_data = agent.obs_data, agent.act_data
     is_train = False
-    frame_state = observation["frame_state"]
-    hero_list = frame_state["hero_states"]
-    frame_no = frame_state["frameNo"]
+    
+    # 添加类型检查和安全处理
+    if not isinstance(observation, dict):
+        print(f"ERROR: build_frame received invalid observation type: {type(observation)}")
+        return None
+    
+    frame_state = observation.get("frame_state", {})
+    if not isinstance(frame_state, dict):
+        print(f"ERROR: frame_state is not dict: {type(frame_state)}")
+        return None
+    
+    hero_list = frame_state.get("hero_states", [])
+    frame_no = frame_state.get("frameNo", 0)
+    
     for hero in hero_list:
-        hero_camp = hero["actor_state"]["camp"]
-        hero_hp = hero["actor_state"]["hp"]
+        if not isinstance(hero, dict):
+            continue
+        
+        actor_state = hero.get("actor_state", {})
+        if not isinstance(actor_state, dict):
+            continue
+        
+        hero_camp = actor_state.get("camp", 0)
+        hero_hp = actor_state.get("hp", 0)
         if hero_camp == agent.hero_camp:
             is_train = True if hero_hp > 0 else False
 
     if obs_data.feature is not None:
         feature_vec = np.array(obs_data.feature)
     else:
-        feature_vec = np.array(observation["observation"])
+        observation_data = observation.get("observation", [])
+        feature_vec = np.array(observation_data)
 
-    reward = observation["reward"]["reward_sum"]
+    reward_data = observation.get("reward", {})
+    if isinstance(reward_data, dict):
+        reward = reward_data.get("reward_sum", 0)
+    else:
+        reward = 0
 
-    sub_action_mask = observation["sub_action_mask"]
+    sub_action_mask = observation.get("sub_action_mask", [])
 
     prob, value, action = act_data.prob, act_data.value, act_data.action
     lstm_cell, lstm_hidden = act_data.lstm_cell, act_data.lstm_hidden
 
-    legal_action = _update_legal_action(observation["legal_action"], action)
+    legal_action_data = observation.get("legal_action", [])
+    legal_action = _update_legal_action(legal_action_data, action)
     frame = Frame(
         frame_no=frame_no,
         feature=feature_vec.reshape([-1]),

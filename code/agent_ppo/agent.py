@@ -94,8 +94,14 @@ class Agent(BaseAgent):
     def reset(self, observation):
         # Reset function, called at the beginning of each episode
         # 重置函数，每局开始时调用
-        self.hero_camp = observation["player_camp"]
-        self.player_id = observation["player_id"]
+        
+        # 添加类型检查和安全处理
+        if not isinstance(observation, dict):
+            self.logger.error(f"Invalid observation type: {type(observation)}, content: {observation}")
+            return
+        
+        self.hero_camp = observation.get("player_camp", 1)
+        self.player_id = observation.get("player_id", 0)
         self.lstm_hidden = np.zeros([self.lstm_unit_size])
         self.lstm_cell = np.zeros([self.lstm_unit_size])
         self.reward_manager = GameRewardManager(self.player_id)
@@ -174,13 +180,24 @@ class Agent(BaseAgent):
         return d_action
 
     def observation_process(self, observation):
+        # 添加类型检查和安全处理
+        if not isinstance(observation, dict):
+            self.logger.error(f"Invalid observation type in observation_process: {type(observation)}, content: {observation}")
+            # 返回默认的观察数据
+            default_feature = [0.0] * Config.SERI_VEC_SPLIT_SHAPE[0][0]
+            default_legal_action = [1] * sum(Config.LEGAL_ACTION_SIZE_LIST)
+            return ObsData(
+                feature=default_feature, 
+                legal_action=default_legal_action, 
+                lstm_cell=self.lstm_cell, 
+                lstm_hidden=self.lstm_hidden
+            )
+        
         feature = self.feature_processes.process_feature(observation)
-        feature_vec, legal_action = (
-            feature,
-            observation["legal_action"],
-        )
+        legal_action = observation.get("legal_action", [1] * sum(Config.LEGAL_ACTION_SIZE_LIST))
+        
         return ObsData(
-            feature=feature_vec, legal_action=legal_action, lstm_cell=self.lstm_cell, lstm_hidden=self.lstm_hidden
+            feature=feature, legal_action=legal_action, lstm_cell=self.lstm_cell, lstm_hidden=self.lstm_hidden
         )
 
     def action_process(self, observation, act_data, is_stochastic):

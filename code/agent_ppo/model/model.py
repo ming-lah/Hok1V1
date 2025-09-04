@@ -89,14 +89,28 @@ class Model(nn.Module):
         # --------------------------------------------------
 
 
+        # 增强LSTM - 基于论文2的时序建模优化
         self.lstm = torch.nn.LSTM(
             input_size=self.lstm_unit_size,
             hidden_size=self.lstm_unit_size,
-            num_layers=1,
+            num_layers=2,  # 增加层数提升时序建模能力
             bias=True,
             batch_first=True,
-            dropout=0,
+            dropout=0.1 if self.lstm_unit_size > 64 else 0,  # 防止过拟合
             bidirectional=False,
+        )
+        
+        # 孙尚香专用技能连招检测模块
+        self.combo_detector = SunShangxiangComboDetector(
+            lstm_dim=self.lstm_unit_size,
+            combo_dim=64
+        )
+        
+        # 目标注意力机制 - 基于论文2的Target Attention
+        self.target_attention = TargetAttentionModule(
+            feature_dim=self.lstm_unit_size,
+            num_targets=9,  # 对应动作空间的9个目标
+            attention_dim=128
         )
 
         self.label_mlp = ModuleDict(
@@ -391,3 +405,133 @@ class MLP(nn.Module):
 
     def forward(self, data):
         return self.fc_layers(data)
+
+
+class SunShangxiangComboDetector(nn.Module):
+    """孙尚香技能连招检测器 - 基于论文洞察的神经网络实现"""
+    
+    def __init__(self, lstm_dim: int, combo_dim: int):
+        super().__init__()
+        self.lstm_dim = lstm_dim
+        self.combo_dim = combo_dim
+        
+        # 技能状态编码器
+        self.skill_encoder = nn.Sequential(
+            nn.Linear(12, combo_dim),  # 12维技能状态
+            nn.ReLU(),
+            nn.LayerNorm(combo_dim)
+        )
+        
+        # 连招时序建模
+        self.combo_lstm = nn.LSTM(
+            input_size=combo_dim,
+            hidden_size=combo_dim,
+            num_layers=1,
+            batch_first=True
+        )
+        
+        # 连招机会评估
+        self.combo_opportunity_head = nn.Sequential(
+            nn.Linear(lstm_dim + combo_dim, combo_dim),
+            nn.ReLU(),
+            nn.Linear(combo_dim, 4)  # 4种连招类型的概率
+        )
+        
+        # 连招类型：无连招、S1强普、S2标记普攻、S2S1强普三连
+        self.combo_types = ['none', 's1_enhanced', 's2_mark', 's2_s1_enhanced']
+        
+    def forward(self, lstm_output: torch.Tensor, skill_features: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            lstm_output: LSTM输出 [batch, seq, lstm_dim]
+            skill_features: 技能状态特征 [batch, 12]
+        """
+        batch_size = lstm_output.shape[0]
+        
+        # 编码技能状态
+        skill_encoded = self.skill_encoder(skill_features)  # [batch, combo_dim]
+        
+        # 时序建模（如果有历史）
+        skill_seq = skill_encoded.unsqueeze(1)  # [batch, 1, combo_dim]
+        combo_output, _ = self.combo_lstm(skill_seq)
+        combo_features = combo_output.squeeze(1)  # [batch, combo_dim]
+        
+        # 融合LSTM和连招特征
+        combined_features = torch.cat([
+            lstm_output[:, -1, :],  # 取最后时刻的LSTM输出
+            combo_features
+        ], dim=-1)  # [batch, lstm_dim + combo_dim]
+        
+        # 连招机会评估
+        combo_opportunities = self.combo_opportunity_head(combined_features)
+        
+        return {
+            'combo_opportunities': combo_opportunities,
+            'combo_features': combo_features,
+            'skill_encoded': skill_encoded
+        }
+
+
+class TargetAttentionModule(nn.Module):
+    """目标注意力机制 - 基于论文2的Target Attention实现"""
+    
+    def __init__(self, feature_dim: int, num_targets: int, attention_dim: int):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.num_targets = num_targets
+        self.attention_dim = attention_dim
+        
+        # 目标嵌入层
+        self.target_embeddings = nn.Parameter(
+            torch.randn(num_targets, attention_dim) * 0.1
+        )
+        
+        # 查询、键、值投影
+        self.query_proj = nn.Linear(feature_dim, attention_dim)
+        self.key_proj = nn.Linear(attention_dim, attention_dim)
+        self.value_proj = nn.Linear(attention_dim, attention_dim)
+        
+        # 输出投影
+        self.output_proj = nn.Linear(attention_dim, feature_dim)
+        
+        # 注意力缩放因子
+        self.scale = attention_dim ** -0.5
+        
+    def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            features: 输入特征 [batch, feature_dim]
+        
+        Returns:
+            attended_features: 注意力增强特征 [batch, feature_dim]
+            attention_weights: 注意力权重 [batch, num_targets]
+        """
+        batch_size = features.shape[0]
+        
+        # 生成查询
+        queries = self.query_proj(features)  # [batch, attention_dim]
+        
+        # 目标键值对
+        targets = self.target_embeddings.unsqueeze(0).expand(batch_size, -1, -1)  # [batch, num_targets, attention_dim]
+        keys = self.key_proj(targets)    # [batch, num_targets, attention_dim]
+        values = self.value_proj(targets)  # [batch, num_targets, attention_dim]
+        
+        # 计算注意力分数
+        attention_scores = torch.matmul(
+            queries.unsqueeze(1),  # [batch, 1, attention_dim]
+            keys.transpose(-2, -1)  # [batch, attention_dim, num_targets]
+        ) * self.scale  # [batch, 1, num_targets]
+        
+        # 注意力权重
+        attention_weights = F.softmax(attention_scores.squeeze(1), dim=-1)  # [batch, num_targets]
+        
+        # 加权聚合
+        attended_values = torch.matmul(
+            attention_weights.unsqueeze(1),  # [batch, 1, num_targets]
+            values  # [batch, num_targets, attention_dim]
+        ).squeeze(1)  # [batch, attention_dim]
+        
+        # 输出投影
+        attended_features = self.output_proj(attended_values)  # [batch, feature_dim]
+        
+        return attended_features, attention_weights
