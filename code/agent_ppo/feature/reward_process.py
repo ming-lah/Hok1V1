@@ -239,8 +239,6 @@ class GameRewardManager:
                 reward_struct.cur_frame_value = tower_danger
             elif reward_name == "dive_no_minion":
                 reward_struct.cur_frame_value = dive_no_minion
-            elif reward_name == "grass_engage":
-                reward_struct.cur_frame_value = grass_engage
 
             else:
                 reward_struct.cur_frame_value = 0.0
