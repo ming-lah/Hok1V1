@@ -5,19 +5,16 @@
 ###########################################################################
 """
 Author: Tencent AI Arena Authors
-
-- Keep original rewards and interface.
-- Remove grass rewards (grass_engage / grass_in), even if present in weights.
-- Merge image rewards:
-  Dense: hp_point(=hero_hp_point), tower_hp_point, money(gold), ep_rate, exp
-  Sparse: death, kill, last_hit
-  Aliases are supported to avoid refactor in configs.
 """
+
+
 
 import math
 from agent_ppo.conf.conf import GameConfig
 
 
+# Used to record various reward information
+# 用于记录各个奖励信息
 class RewardStruct:
     def __init__(self, m_weight=0.0):
         self.cur_frame_value = 0.0
@@ -28,6 +25,8 @@ class RewardStruct:
         self.is_first_arrive_center = True
 
 
+# Used to initialize various reward information
+# 用于初始化各个奖励信息
 def init_calc_frame_map():
     calc_frame_map = {}
     for key, weight in GameConfig.REWARD_WEIGHT_DICT.items():
@@ -52,6 +51,8 @@ class GameRewardManager:
         self.m_each_level_max_exp = {}
         self.RANGE_NORM = 15000.0
 
+    # Used to initialize the maximum experience value for each agent level
+    # 用于初始化智能体各个等级的最大经验值
     def init_max_exp_of_each_hero(self):
         self.m_each_level_max_exp.clear()
         self.m_each_level_max_exp[1] = 160
@@ -81,34 +82,12 @@ class GameRewardManager:
 
         return self.m_reward_value
 
-    # ---------------- helpers ---------------- #
-    @staticmethod
-    def _pos(o):
-        try:
-            if not isinstance(o, dict):
-                return 0.0, 0.0
-            loc = o.get("location") or {}
-            return float(loc.get("x", 0.0)), float(loc.get("z", 0.0))
-        except Exception:
-            return 0.0, 0.0
-
-    @staticmethod
-    def _hp_ratio(u):
-        if not isinstance(u, dict):
-            return 0.0
-        hp = float(u.get("hp", 0.0))
-        mx = float(u.get("max_hp", 0.0))
-        return hp / mx if mx > 0 else 0.0
-
-    @staticmethod
-    def _ep_ratio(actor_state):
-        vals = (actor_state or {}).get("values", {}) or {}
-        ep = float(vals.get("ep", 0.0))
-        mx = float(vals.get("max_ep", 0.0))
-        return ep / mx if mx > 0 else 0.0
-
-    # ---------------- per-side frame calc ---------------- #
+    # Calculate the value of each reward item in each frame
+    # 计算每帧的每个奖励子项的信息
     def set_cur_calc_frame_vec(self, cul_calc_frame_map, frame_data, camp):
+
+        # Get both agents
+        # 获取双方智能体
         main_hero, enemy_hero = None, None
         hero_list = frame_data["hero_states"]
         for hero in hero_list:
@@ -118,7 +97,8 @@ class GameRewardManager:
             else:
                 enemy_hero = hero
 
-        # towers
+        # Get both defense towers
+        # 获取双方防御塔
         main_tower, main_spring, enemy_tower, enemy_spring = None, None, None, None
         npc_list = frame_data["npc_states"]
         for organ in npc_list:
@@ -134,19 +114,40 @@ class GameRewardManager:
                     enemy_tower = organ
                 elif organ_subtype == "ACTOR_SUB_CRYSTAL":
                     enemy_spring = organ
+        
+        # 工具函数
+        def _pos(o):
+            try:
+                if not isinstance(o, dict):
+                    return 0.0, 0.0
+                loc = o.get("location") or {}
+                x = float(loc.get("x", 0.0))
+                z = float(loc.get("z", 0.0))
+                return x, z
+            except Exception:
+                return 0.0, 0.0
 
-        enemy_camp = (enemy_hero.get("actor_state") or {}).get("camp") if enemy_hero else None
+        
+        def _hp_ratio(u):
+            if not isinstance(u, dict):
+                return 0.0
+            hp = float(u.get("hp", 0.0))
+            mx = float(u.get("max_hp", 0.0))
+            return hp / mx if mx > 0 else 0.0
 
+        enemy_camp = None
+        if enemy_hero:
+            enemy_camp = (enemy_hero.get("actor_state") or {}).get("camp")
         A = [n for n in npc_list if n.get("sub_type") == "ACTOR_SUB_SOLDIER" and n.get("camp") == camp and n.get("hp", 0) > 0]
         E = [n for n in npc_list if n.get("sub_type") == "ACTOR_SUB_SOLDIER" and n.get("camp") == enemy_camp and n.get("hp", 0) > 0]
-
+        
         def _front_to_tower(lst, tower):
             if not lst or not tower:
                 return self.RANGE_NORM
-            tx, tz = self._pos(tower)
+            tx, tz = _pos(tower)
             best = self.RANGE_NORM
             for u in lst:
-                ux, uz = self._pos(u)
+                ux, uz = _pos(u)
                 d = math.hypot(ux - tx, uz - tz)
                 if d < best:
                     best = d
@@ -156,13 +157,12 @@ class GameRewardManager:
         e_front = _front_to_tower(E, main_tower)
         push_depth = (e_front - a_front) / self.RANGE_NORM  # [-1,1]
 
-        # tower danger & dive
         tower_danger = 0.0
         dive_no_minion = 0.0
         if main_hero and enemy_tower:
             me = (main_hero.get("actor_state") or {})
-            mx, mz = self._pos(me)
-            ex, ez = self._pos(enemy_tower)
+            mx, mz = _pos(me)
+            ex, ez = _pos(enemy_tower)
             atk_r = float(enemy_tower.get("attack_range", 0.0))
             in_range = 1.0 if (atk_r > 0 and math.hypot(mx - ex, mz - ez) <= atk_r) else 0.0
             target_me = 1.0 if str(enemy_tower.get("attack_target", "")) == str(me.get("runtime_id", "")) else 0.0
@@ -170,15 +170,25 @@ class GameRewardManager:
 
             near_cnt = 0
             for u in A:
-                ux, uz = self._pos(u)
+                ux, uz = _pos(u)
                 if atk_r > 0 and math.hypot(ux - ex, uz - ez) <= atk_r * 0.9:
                     near_cnt += 1
             dive_no_minion = 1.0 if (in_range and near_cnt == 0) else 0.0
 
-        # ---- events: kill / death / last_hit ----
-        kill_event, death_event, last_hit_event = 0.0, 0.0, 0.0
+        # --- 草丛埋伏（非零和） ---
+        grass_engage = 0.0
+        if main_hero and enemy_hero:
+            a_in = 0.1 if (main_hero.get("isInGrass") or (main_hero.get("actor_state") or {}).get("isInGrass")) else 0
+            e_in = 0.1 if (enemy_hero.get("isInGrass") or (enemy_hero.get("actor_state") or {}).get("isInGrass")) else 0
+            if a_in and not e_in:
+                ax, az = _pos((main_hero.get("actor_state") or {}))
+                ex, ez = _pos((enemy_hero.get("actor_state") or {}))
+                if math.hypot(ax - ex, az - ez) <= 5000.0:
+                    grass_engage = 0.1
+
+        # --- 事件：击杀/死亡（帧级） ---
+        kill_event, death_event = 0.0, 0.0
         acts = frame_data.get("frame_action", []) or []
-        my_id = str((main_hero.get("actor_state") or {}).get("runtime_id", "")) if main_hero else ""
         if isinstance(acts, list):
             for a in acts:
                 if not isinstance(a, dict):
@@ -186,109 +196,104 @@ class GameRewardManager:
                 da = a.get("dead_action") or {}
                 if not isinstance(da, dict):
                     continue
-                death = da.get("death") or {}
-                killer = da.get("killer") or {}
-                death_camp = death.get("camp", None)
-                killer_camp = killer.get("camp", None)
+                death = (da.get("death") or {}).get("camp", None)
+                killer = (da.get("killer") or {}).get("camp", None)
+                if killer == camp:
+                    kill_event += 10.0
+                if death == camp:
+                    death_event += 10.0
 
-                # hero-vs-hero
-                if death.get("sub_type") in ("ACTOR_SUB_hero", "ACTOR_SUB_HERO", "hero"):
-                    if killer_camp == camp:  # 我方击杀
-                        kill_event += 1.0
-                    if death_camp == camp:   # 我方阵亡
-                        death_event += 1.0
+        # --- 经济（我方） ---
+        gold_point = 0.0
+        if main_hero:
+            astate = main_hero.get("actor_state") or {}
+            gold_point = float(astate.get("gold", astate.get("money", 0.0)) or 0.0)
 
-                # last hit soldier
-                if death.get("sub_type") in ("ACTOR_SUB_SOLDIER", "soldier", "SOLDIER"):
-                    killer_id = str(killer.get("runtime_id", killer.get("config_id", "")))
-                    if killer_id and killer_id == my_id:
-                        last_hit_event += 1.0
-                    elif killer_camp == camp:
-                        last_hit_event += 1.0
+        # --- 英雄/塔血量比例 ---
+        hero_hp_ratio = _hp_ratio((main_hero or {}).get("actor_state") or {})
+        my_tower_hp_ratio = _hp_ratio(main_tower)
 
-        # ---- dense stats (my side) ----
-        hp_ratio = self._hp_ratio((main_hero or {}).get("actor_state") or {})
-        tower_ratio = self._hp_ratio(main_tower or {})
-        gold_total = float(main_hero.get("money", 0.0) if main_hero else 0.0)
-        ep_ratio = self._ep_ratio((main_hero or {}).get("actor_state") or {})
-        exp_total = float(main_hero.get("exp", 0.0) if main_hero else 0.0)
 
-        # ---- write per-key values (alias-friendly) ----
+        
         for reward_name, reward_struct in cul_calc_frame_map.items():
             reward_struct.last_frame_value = reward_struct.cur_frame_value
-
-            # Dense (aliases)
-            if reward_name in ("tower_hp_point",):
-                reward_struct.cur_frame_value = tower_ratio
-            elif reward_name in ("forward",):
+            # Tower health points
+            # 塔血量
+            if reward_name == "tower_hp_point":
+                reward_struct.cur_frame_value = 1.0 * main_tower["hp"] / main_tower["max_hp"]
+            # Forward
+            # 前进
+            elif reward_name == "forward":
                 reward_struct.cur_frame_value = self.calculate_forward(main_hero, main_tower, enemy_tower)
-            elif reward_name in ("hero_hp_point", "hp_point"):
-                reward_struct.cur_frame_value = hp_ratio
-            elif reward_name in ("gold_point", "money", "gold", "money_point"):
-                reward_struct.cur_frame_value = gold_total
-            elif reward_name in ("minion_push_depth",):
+            elif reward_name == "hero_hp_point":
+                reward_struct.cur_frame_value = hero_hp_ratio
+            elif reward_name == "gold_point":
+                reward_struct.cur_frame_value = gold_point
+            elif reward_name == "minion_push_depth":
                 reward_struct.cur_frame_value = push_depth
-            elif reward_name in ("ep_rate",):
-                reward_struct.cur_frame_value = ep_ratio
-            elif reward_name in ("exp", "exp_point"):
-                reward_struct.cur_frame_value = exp_total
-
-            # Events (aliases)
-            elif reward_name in ("kill_event", "kill"):
+            elif reward_name == "kill_event":
                 reward_struct.cur_frame_value = kill_event
-            elif reward_name in ("death_event", "death"):
+            elif reward_name == "death_event":
                 reward_struct.cur_frame_value = death_event
-            elif reward_name in ("last_hit_event", "last_hit"):
-                reward_struct.cur_frame_value = last_hit_event
-
-            # Grass rewards — removed/disabled explicitly
-            elif reward_name in ("grass_engage", "grass_in", "grass"):
-                reward_struct.cur_frame_value = 0.0
+            elif reward_name == "tower_danger":
+                reward_struct.cur_frame_value = tower_danger
+            elif reward_name == "dive_no_minion":
+                reward_struct.cur_frame_value = dive_no_minion
+            elif reward_name == "grass_engage":
+                reward_struct.cur_frame_value = grass_engage
 
             else:
                 reward_struct.cur_frame_value = 0.0
 
+
+    # Calculate the forward reward based on the distance between the agent and both defensive towers
+    # 用智能体到双方防御塔的距离，计算前进奖励
     def calculate_forward(self, main_hero, main_tower, enemy_tower):
-        main_tower_pos = (main_tower["location"]["x"], main_tower["location"]["z"]) if main_tower else (0.0, 0.0)
-        enemy_tower_pos = (enemy_tower["location"]["x"], enemy_tower["location"]["z"]) if enemy_tower else (0.0, 0.0)
+        main_tower_pos = (main_tower["location"]["x"], main_tower["location"]["z"])
+        enemy_tower_pos = (enemy_tower["location"]["x"], enemy_tower["location"]["z"])
         hero_pos = (
-            (main_hero or {}).get("actor_state", {}).get("location", {}).get("x", 0.0),
-            (main_hero or {}).get("actor_state", {}).get("location", {}).get("z", 0.0),
+            main_hero["actor_state"]["location"]["x"],
+            main_hero["actor_state"]["location"]["z"],
         )
-        dist_hero2emy = math.dist(hero_pos, enemy_tower_pos) if enemy_tower else 0.0
-        dist_main2emy = max(math.dist(main_tower_pos, enemy_tower_pos), 1e-6) if main_tower and enemy_tower else 1.0
+        forward_value = 0
+        dist_hero2emy = math.dist(hero_pos, enemy_tower_pos)
+        dist_main2emy = max(math.dist(main_tower_pos, enemy_tower_pos), 1e-6)
         base = (dist_main2emy - dist_hero2emy) / dist_main2emy
         base = max(0.0, base)  # 远离敌塔不奖励
-        hp = float((main_hero or {}).get("actor_state", {}).get("hp", 0.0))
-        mx = max(float((main_hero or {}).get("actor_state", {}).get("max_hp", 1.0)), 1.0)
+        hp = float(main_hero["actor_state"]["hp"])
+        mx = max(float(main_hero["actor_state"]["max_hp"]), 1.0)
         hp_scale = hp / mx
-        return base * hp_scale
+        return base * hp_scale  # 或者直接 return base
 
+    # Calculate the reward item information for both sides using frame data
+    # 用帧数据来计算两边的奖励子项信息
     def frame_data_process(self, frame_data):
         main_camp, enemy_camp = -1, -1
+
         for hero in frame_data["hero_states"]:
             if hero["player_id"] == self.main_hero_player_id:
                 main_camp = hero["actor_state"]["camp"]
                 self.main_hero_camp = main_camp
+
             else:
                 enemy_camp = hero["actor_state"]["camp"]
         self.set_cur_calc_frame_vec(self.m_main_calc_frame_map, frame_data, main_camp)
         self.set_cur_calc_frame_vec(self.m_enemy_calc_frame_map, frame_data, enemy_camp)
 
+    # Use the values obtained in each frame to calculate the corresponding reward value
+    # 用每一帧得到的奖励子项信息来计算对应的奖励值
     def get_reward(self, frame_data, reward_dict):
         reward_dict.clear()
         reward_sum, weight_sum = 0.0, 0.0
 
-        # absolute terms per-frame (not zero-sum)
-        ABS_NAMES = {"forward", "tower_danger", "dive_no_minion"}
-        # instantaneous event diff
-        EVENT_NAMES = {"kill_event", "kill", "death_event", "death", "last_hit_event", "last_hit"}
-        # removed grass rewards if they still appear in weights
-        GRASS_NAMES = {"grass_engage", "grass_in", "grass"}
+        # 非零和即时值
+        ABS_NAMES = {"forward", "tower_danger", "dive_no_minion", "grass_engage"}
+        # 事件瞬时差（避免“下一帧反向跳变”）
+        EVENT_NAMES = {"kill_event", "death_event"}
 
         for reward_name, reward_struct in self.m_cur_calc_frame_map.items():
-            w = reward_struct.weight or 0.0
-            if w == 0.0 or reward_name in GRASS_NAMES:
+            w = reward_struct.weight
+            if w == 0.0:
                 reward_struct.value = 0.0
                 reward_dict[reward_name] = 0.0
                 continue
@@ -302,7 +307,7 @@ class GameRewardManager:
                     self.m_main_calc_frame_map[reward_name].cur_frame_value
                     - self.m_enemy_calc_frame_map[reward_name].cur_frame_value
                 )
-                reward_struct.value = cur_diff
+                reward_struct.value = cur_diff  # 仅使用瞬时差
 
             else:
                 cur_diff = (
