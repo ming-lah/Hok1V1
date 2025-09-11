@@ -35,7 +35,7 @@ class OrganProcess:
         # 其他特征属性
         self.MAP_NORM = 30000.0
         self.RANGE_NORM = 15000.0
-        self.MINION_TOPK = 4
+        self.MINION_TOPK = 6
         self.BULLET_TOPK = 4
 
     def get_organ_config(self):

@@ -14,20 +14,14 @@ class GameConfig:
     TIME_SCALE_ARG = 0  # 不做时间衰减；需要时可设为一局的帧数量级
 
     REWARD_WEIGHT_DICT = {
-        "tower_hp_point": 4.0,
-        "forward": 0.5,
-        "minion_push_depth": 0.2,
-        "tower_danger": -0.7,
-        "dive_no_minion": -0.7,
-        "kill_event": 0.8,     # 或者 "kill": 0.6
-        "death_event": -1.0,   # 或者 "death": -1.0
-        "gold_point": 0.006,   # 或 "money": 0.006
-        "hero_hp_point": 2.2,  # 或 "hp_point": 2.0
-
-        "ep_rate": 0.75,
-        "exp": 0.006,          # 或 "exp_point": 0.006
-        "last_hit": 0.5,       # 或 "last_hit_event": 0.5
-
+        "hp_point": 2,
+        "tower_hp_point":5,
+        "money":0.006,
+        "ep_rate":0.75,
+        "death":-1,
+        "kill":-0.6,
+        "exp":0.006,
+        "last_hit":0.5
     }
 
 
@@ -44,7 +38,7 @@ class GameConfig:
 # Dimension configuration, used when building the model
 # 维度配置，构建模型时使用
 class DimConfig:
-    DIM_OF_FEATURE = [260]
+    DIM_OF_FEATURE = [295]
 
 
 # Configuration related to model and algorithms used
@@ -54,7 +48,7 @@ class Config:
     LSTM_TIME_STEPS = 16
     LSTM_UNIT_SIZE = 512
     DATA_SPLIT_SHAPE = [
-        260 + 85,
+        295 + 85,
         1,
         1,
         1,
@@ -79,7 +73,7 @@ class Config:
         LSTM_UNIT_SIZE,
         LSTM_UNIT_SIZE,
     ]
-    SERI_VEC_SPLIT_SHAPE = [(260,), (85,)]
+    SERI_VEC_SPLIT_SHAPE = [(295,), (85,)]
     INIT_LEARNING_RATE_START = 1e-3
     TARGET_LR = 1e-4
     TARGET_STEP = 5000
@@ -102,7 +96,7 @@ class Config:
     TARGET_EMBED_DIM = 32
 
     data_shapes = [
-        [(260 + 85) * 16],
+        [(295 + 85) * 16],
         [16],
         [16],
         [16],
