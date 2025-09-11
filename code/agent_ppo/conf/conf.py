@@ -38,7 +38,7 @@ class GameConfig:
 # Dimension configuration, used when building the model
 # 维度配置，构建模型时使用
 class DimConfig:
-    DIM_OF_FEATURE = [295]
+    DIM_OF_FEATURE = [310]
 
 
 # Configuration related to model and algorithms used
@@ -48,7 +48,7 @@ class Config:
     LSTM_TIME_STEPS = 16
     LSTM_UNIT_SIZE = 512
     DATA_SPLIT_SHAPE = [
-        295 + 85,
+        310 + 85,
         1,
         1,
         1,
@@ -73,7 +73,7 @@ class Config:
         LSTM_UNIT_SIZE,
         LSTM_UNIT_SIZE,
     ]
-    SERI_VEC_SPLIT_SHAPE = [(295,), (85,)]
+    SERI_VEC_SPLIT_SHAPE = [(310,), (85,)]
     INIT_LEARNING_RATE_START = 1e-3
     TARGET_LR = 1e-4
     TARGET_STEP = 5000
@@ -96,7 +96,7 @@ class Config:
     TARGET_EMBED_DIM = 32
 
     data_shapes = [
-        [(295 + 85) * 16],
+        [(310 + 85) * 16],
         [16],
         [16],
         [16],

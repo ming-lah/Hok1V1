@@ -11,7 +11,7 @@ Keep original structure & interfaces:
 """
 import math
 from typing import Dict, Any, List, Tuple
-
+import json
 from agent_ppo.conf.conf import GameConfig
 
 
@@ -136,30 +136,97 @@ class GameRewardManager:
                 return True
         return False
 
-    def _collect_events(self, frame_data: Dict[str, Any]) -> Tuple[int, int, int]:
+    def _collect_events(self, frame_data):
         """
-        Parse frame_action to get (my_kill_hero, my_death, my_last_hit_soldier) counts in this frame.
+        Robustly parse kill/death/last_hit from frame_action.
+        Returns (my_kill_hero, my_death, my_last_hit_soldier) for THIS FRAME.
+        - frame_action may be None / dict / list / string (even JSON string).
+        - non-dict entries are ignored safely.
         """
-        my_kill, my_death, my_last_hit = 0, 0, 0
-        acts: List[Dict] = frame_data.get("frame_action", []) or []
+        def _ensure_list(x):
+            if x is None:
+                return []
+            if isinstance(x, list):
+                return x
+            if isinstance(x, dict):
+                return [x]
+            if isinstance(x, str):
+                # try JSON -> dict/list; else treat as noise
+                try:
+                    y = json.loads(x)
+                    return _ensure_list(y)
+                except Exception:
+                    return []
+            return []
+
+        def _get(d, *keys, default=None):
+            cur = d if isinstance(d, dict) else {}
+            for k in keys:
+                if not isinstance(cur, dict):
+                    return default
+                cur = cur.get(k)
+            return default if cur is None else cur
+
+        def _is_subtype(obj, names):
+            if not isinstance(obj, dict):
+                return False
+            for k in ("sub_type", "actor_sub_type", "actor_type", "type"):
+                v = obj.get(k)
+                if isinstance(v, str) and v in names:
+                    return True
+            return False
+
+        acts = _ensure_list(frame_data.get("frame_action"))
+
+        my_kill = my_death = my_last_hit = 0
+
         for a in acts:
-            da = (a or {}).get("dead_action") or {}
-            death = da.get("death")  or {}
-            killer= da.get("killer") or {}
+            if not isinstance(a, dict):
+                continue  # skip strings, numbers, etc.
 
-            killer_camp = killer.get("camp", None)
-            death_camp  = death.get("camp", None)
+            # 1) 优先解析 dead_action 结构
+            da = a.get("dead_action") or a.get("deadAction")
+            if isinstance(da, dict):
+                killer = da.get("killer") or {}
+                death  = da.get("death") or {}
 
-            # hero killed by me
-            if killer_camp == self.main_hero_camp and self._is_subtype(death, ("ACTOR_SUB_HERO", "HERO")):
-                my_kill += 1
-            # I died
-            if death_camp == self.main_hero_camp and self._is_subtype(death, ("ACTOR_SUB_HERO", "HERO")):
+                killer_camp = killer.get("camp", killer.get("player_camp"))
+                death_camp  = death.get("camp",  death.get("player_camp"))
+
+                if _is_subtype(death, ("ACTOR_SUB_HERO", "HERO")):
+                    if killer_camp == self.main_hero_camp:
+                        my_kill += 1
+                    if death_camp == self.main_hero_camp:
+                        my_death += 1
+
+                if _is_subtype(death, ("ACTOR_SUB_SOLDIER", "SOLDIER", "MINION")):
+                    if killer_camp == self.main_hero_camp:
+                        my_last_hit += 1
+                continue  # 本条解析完，处理下一条
+
+            # 2) 兼容另一类扁平事件：type/camp/target 等
+            #    这里只做最宽松的兜底，不影响 dead_action 的主流程
+            etype = (a.get("type") or a.get("event_type") or "").lower()
+            camp  = a.get("camp") or a.get("from_camp")
+            tgt   = a.get("target") or a.get("death") or {}
+            if isinstance(tgt, dict):
+                tgt_is_hero    = _is_subtype(tgt, ("ACTOR_SUB_HERO", "HERO"))
+                tgt_is_soldier = _is_subtype(tgt, ("ACTOR_SUB_SOLDIER", "SOLDIER", "MINION"))
+            else:
+                tgt_is_hero = tgt_is_soldier = False
+
+            # 仅当有明确 camp 且等于我方时计入
+            if camp == self.main_hero_camp:
+                if etype in ("kill", "hero_kill") or tgt_is_hero:
+                    my_kill += 1
+                if etype in ("last_hit", "soldier_last_hit") or tgt_is_soldier:
+                    my_last_hit += 1
+            # 自身死亡有时以 'death' 标记在自己侧
+            if etype in ("death", "hero_death") and camp == self.main_hero_camp:
                 my_death += 1
-            # I last-hit a soldier
-            if killer_camp == self.main_hero_camp and self._is_subtype(death, ("ACTOR_SUB_SOLDIER", "SOLDIER", "MINION")):
-                my_last_hit += 1
+
         return my_kill, my_death, my_last_hit
+
 
     def _frame_data_process_one_side(self, calc_map: Dict[str, RewardStruct], frame_data: Dict[str, Any], for_my_side: bool):
         """Fill per-item current values for one side (my or enemy) in calc_map."""
