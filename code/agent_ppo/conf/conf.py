@@ -18,11 +18,20 @@ class GameConfig:
         "tower_hp_point":5,
         "money":0.006,
         "ep_rate":0.75,
-        "death":-1,
-        "kill":-0.6,
+        "death":-2.5,
+        "kill":2.2,
         "exp":0.006,
         "last_hit":0.5
     }
+
+    FRAME_ACTION_VECTOR_MAP = {
+    "my_kill_hero": 0,
+    "my_death": 1,
+    "my_last_hit_soldier": 2,
+    }
+    FRAME_ACTION_VECTOR_IS_CUMULATIVE = True
+    FRAME_ACTION_VECTOR_IS_BINARY = False
+    # TIME_SCALE_ARG = 20000
 
 
 

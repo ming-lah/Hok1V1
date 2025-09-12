@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
-# -*- coding: UTF-8 -*-
+# -*- coding: utf-8 -*-
 """
-HoK 1v1 Reward (8 items) aligned with the doc table:
-- dense : hp_point, tower_hp_point, money, ep_rate, exp
-- sparse: death, kill, last_hit
+HoK 1v1 Reward (8 + forward_progress) aligned to the doc:
 
-Keep original structure & interfaces:
-- RewardStruct / init_calc_frame_map / GameRewardManager
-- Uses GameConfig.REWARD_WEIGHT_DICT & TIME_SCALE_ARG
+dense : hp_point, tower_hp_point, money, ep_rate, exp, forward_progress
+sparse: death, kill, last_hit
+
+- frame_action: 支持“一维向量”，从 GameConfig.FRAME_ACTION_VECTOR_MAP 按索引读取；
+  可配置累计/逐帧、二值/计数。
+- 密集项口径：
+  * SELF_DENSE = {hp_point, ep_rate, money, exp, forward_progress}
+      -> 仅取“我方本帧增量 my_cur - my_last”
+  * ADV_DENSE  = {tower_hp_point}
+      -> 取对抗优势的增量 (my - en)_t - (my - en)_{t-1}
+- 稀疏项口径：
+  * SPARSE = {death, kill, last_hit} -> “我方本帧事件次数” = my_cur - my_last
+- forward_progress:
+  * 以“我方塔→敌方塔”的单位向量为前进轴 u，英雄位置 p 的投影 s = <p, u>
+  * 本帧奖励 = s_t - s_{t-1}，可配置只计正向、步长上限
+- 仍保留 TIME_SCALE_ARG 衰减。
 """
+
+from typing import Dict, Any, Tuple, List
 import math
-from typing import Dict, Any, List, Tuple
-import json
+
 from agent_ppo.conf.conf import GameConfig
 
 
-# --------------------------- data structs --------------------------- #
+# --------------------------- data struct --------------------------- #
 class RewardStruct:
-    """Per-item accumulator with frame cache and weight."""
     def __init__(self, m_weight: float = 0.0):
         self.cur_frame_value: float = 0.0
         self.last_frame_value: float = 0.0
@@ -26,296 +37,350 @@ class RewardStruct:
 
 
 def init_calc_frame_map() -> Dict[str, RewardStruct]:
-    """Create a map[item_name] -> RewardStruct using GameConfig weights."""
-    calc_frame_map: Dict[str, RewardStruct] = {}
-    for key, weight in GameConfig.REWARD_WEIGHT_DICT.items():
-        calc_frame_map[key] = RewardStruct(weight)
-    return calc_frame_map
+    m: Dict[str, RewardStruct] = {}
+    for key, w in GameConfig.REWARD_WEIGHT_DICT.items():
+        m[key] = RewardStruct(float(w))
+    return m
 
 
 # ----------------------------- manager ----------------------------- #
 class GameRewardManager:
     """
-    Eight-item reward consistent with the doc:
-      hp_point(=my hp_ratio), tower_hp_point(=my tower hp_ratio),
-      money(=my total gold), ep_rate(=my mp_ratio), exp(=my exp),
-      death(event: I die), kill(event: I kill enemy hero), last_hit(event: I last-hit a soldier)
+    使用方法：
+      mgr = GameRewardManager(main_player_id=<你的我方 player_id 或 runtime_id>)
+      d = mgr.result(frame_state)  # 返回各子项和 reward_sum
     """
-    DENSE_KEYS  = {"hp_point", "tower_hp_point", "money", "ep_rate", "exp"}
-    SPARSE_KEYS = {"death", "kill", "last_hit"}
 
-    def __init__(self, main_hero_runtime_id: int):
-        self.main_hero_player_id = main_hero_runtime_id  # run-time id used to find my hero
-        self.main_hero_camp = -1
+    SELF_DENSE = {"hp_point", "ep_rate", "money", "exp", "forward_progress"}
+    ADV_DENSE  = {"tower_hp_point"}
+    SPARSE     = {"death", "kill", "last_hit"}
 
-        # three maps: "current frame (diff/delta)" containers for both sides + my output
-        self.m_cur_calc_frame_map  = init_calc_frame_map()
-        self.m_main_calc_frame_map = init_calc_frame_map()
-        self.m_enemy_calc_frame_map= init_calc_frame_map()
+    def __init__(self, main_player_id: int):
+        # 允许用 player_id 或 runtime_id 识别自己
+        self.main_player_id = int(main_player_id)
+        self.main_hero_camp = None  # 在首帧识别
+        # 三套 map：我方、敌方、（只是用作权重容器与输出承载）
+        self.m_main_calc_frame_map  = init_calc_frame_map()
+        self.m_enemy_calc_frame_map = init_calc_frame_map()
+        self.m_cur_calc_frame_map   = init_calc_frame_map()
 
-        self.time_scale_arg = GameConfig.TIME_SCALE_ARG
+        self.time_scale_arg = getattr(GameConfig, "TIME_SCALE_ARG", 0)
+        # 事件向量累计缓存（用于做差分）
+        self._last_event_cum = {"my_kill_hero": 0, "my_death": 0, "my_last_hit_soldier": 0}
+        self._printed_probe = False
 
-    # -------------------------- public API -------------------------- #
-    def result(self, frame_data: Dict[str, Any]) -> Dict[str, float]:
-        """Compute each reward item this frame (weighted sum returned in dict["reward_sum"])."""
-        self._frame_data_process(frame_data)
-        reward_dict: Dict[str, float] = {}
-        self._combine_reward(frame_data, reward_dict)
+    # ======================= public interface ======================= #
+    def result(self, frame_state: Dict[str, Any]) -> Dict[str, float]:
+        self._frame_data_process(frame_state)
+        out: Dict[str, float] = {}
+        self._combine_reward(frame_state, out)
 
-        # time-decay shaping if enabled
-        frame_no = int(frame_data.get("frameNo", 0))
+        # 时间衰减（可选）
+        frame_no = int(frame_state.get("frameNo", 0))
         if self.time_scale_arg and self.time_scale_arg > 0:
             decay = math.pow(0.6, 1.0 * frame_no / float(self.time_scale_arg))
-            for k in reward_dict:
-                reward_dict[k] *= decay
-        return reward_dict
+            for k in out:
+                out[k] *= decay
+        return out
 
-    # ----------------------- frame preprocessing --------------------- #
-    def _get_heroes(self, frame_data: Dict[str, Any]) -> Tuple[Dict, Dict]:
-        """Return (my_hero, enemy_hero) dicts."""
-        me, enemy = None, None
-        for h in frame_data.get("hero_states", []) or []:
-            camp = (h.get("actor_state") or {}).get("camp", None)
-            # my camp discovered earlier in _frame_data_process
-            if camp == self.main_hero_camp:
-                me = h
-            else:
-                enemy = h
-        return me, enemy
-
-    def _get_towers(self, frame_data: Dict[str, Any]) -> Tuple[Dict, Dict]:
-        """Return (my_tower, enemy_tower)."""
-        my_t, en_t = None, None
-        for u in frame_data.get("npc_states", []) or []:
-            if u.get("sub_type") != "ACTOR_SUB_TOWER":
-                continue
-            if u.get("camp") == self.main_hero_camp:
-                my_t = u
-            else:
-                en_t = u
-        return my_t, en_t
-
+    # ============================ helpers ============================ #
     @staticmethod
-    def _hp_ratio(u: Dict) -> float:
-        if not isinstance(u, dict):
+    def _hp_ratio(state: Dict[str, Any]) -> float:
+        if not isinstance(state, dict):
             return 0.0
-        hp = float(u.get("hp", 0.0))
-        mx = float(u.get("max_hp", 0.0))
+        hp = float(state.get("hp", 0.0))
+        mx = float(state.get("max_hp", 0.0))
         return hp / mx if mx > 0 else 0.0
 
     @staticmethod
-    def _actor_state(hero: Dict) -> Dict:
+    def _actor_state_from_hero(hero: Dict[str, Any]) -> Dict[str, Any]:
         return (hero or {}).get("actor_state") or {}
 
     @staticmethod
-    def _get_gold(astate: Dict) -> float:
-        # prefer explicit gold; fallback to money
+    def _camp_of_hero(hero: Dict[str, Any]):
+        return ((hero or {}).get("actor_state") or {}).get("camp", None)
+
+    @staticmethod
+    def _get_gold(astate: Dict[str, Any]) -> float:
         return float(astate.get("gold", astate.get("money", 0.0)) or 0.0)
 
     @staticmethod
-    def _get_ep_rate(astate: Dict) -> float:
-        ep  = float((astate.get("values") or {}).get("ep", 0.0))
-        mx  = float((astate.get("values") or {}).get("max_ep", 1.0))
+    def _get_ep_rate(astate: Dict[str, Any]) -> float:
+        v = astate.get("values") or {}
+        ep, mx = float(v.get("ep", 0.0)), float(v.get("max_ep", 1.0))
         return 0.0 if mx <= 0 else ep / mx
 
     @staticmethod
-    def _get_exp(hero: Dict) -> float:
+    def _get_exp(hero: Dict[str, Any]) -> float:
         try:
-            return float(hero.get("exp", 0.0))
+            return float((hero or {}).get("exp", 0.0))
         except Exception:
             return 0.0
 
     @staticmethod
-    def _is_subtype(obj: Dict, names: Tuple[str, ...]) -> bool:
-        """Check subtype tags robustly."""
+    def _is_tower(obj: Dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
         for k in ("sub_type", "actor_sub_type", "actor_type", "type"):
-            v = obj.get(k, None)
-            if isinstance(v, str) and v in names:
+            v = obj.get(k)
+            if isinstance(v, str) and v in ("ACTOR_SUB_TOWER", "TOWER"):
                 return True
         return False
 
-    def _collect_events(self, frame_data):
-        """
-        Robustly parse kill/death/last_hit from frame_action.
-        Returns (my_kill_hero, my_death, my_last_hit_soldier) for THIS FRAME.
-        - frame_action may be None / dict / list / string (even JSON string).
-        - non-dict entries are ignored safely.
-        """
-        def _ensure_list(x):
-            if x is None:
-                return []
-            if isinstance(x, list):
-                return x
-            if isinstance(x, dict):
-                return [x]
-            if isinstance(x, str):
-                # try JSON -> dict/list; else treat as noise
-                try:
-                    y = json.loads(x)
-                    return _ensure_list(y)
-                except Exception:
-                    return []
-            return []
+    @staticmethod
+    def _xy_from(obj: Dict[str, Any]) -> Tuple[float, float]:
+        """从 hero.actor_state.location 或 npc.location 取 (x,z)"""
+        if not isinstance(obj, dict):
+            return 0.0, 0.0
+        loc = (obj.get("actor_state") or {}).get("location") if "actor_state" in obj else obj.get("location")
+        if not isinstance(loc, dict):
+            return 0.0, 0.0
+        return float(loc.get("x", 0.0)), float(loc.get("z", 0.0))
 
-        def _get(d, *keys, default=None):
-            cur = d if isinstance(d, dict) else {}
-            for k in keys:
-                if not isinstance(cur, dict):
-                    return default
-                cur = cur.get(k)
-            return default if cur is None else cur
+    def _identify_camps(self, frame_state: Dict[str, Any]):
+        """在首帧根据 player_id 或 runtime_id 识别我方阵营。"""
+        if self.main_hero_camp is not None:
+            return
+        for h in frame_state.get("hero_states", []) or []:
+            pid = h.get("player_id", None)
+            rt  = ((h.get("actor_state") or {}).get("runtime_id", None))
+            if pid == self.main_player_id or rt == self.main_player_id:
+                self.main_hero_camp = self._camp_of_hero(h)
+                break
+        # 兜底
+        if self.main_hero_camp is None:
+            self.main_hero_camp = frame_state.get("player_camp", None)
 
-        def _is_subtype(obj, names):
-            if not isinstance(obj, dict):
-                return False
-            for k in ("sub_type", "actor_sub_type", "actor_type", "type"):
-                v = obj.get(k)
-                if isinstance(v, str) and v in names:
-                    return True
-            return False
-
-        acts = _ensure_list(frame_data.get("frame_action"))
-
-        my_kill = my_death = my_last_hit = 0
-
-        for a in acts:
-            if not isinstance(a, dict):
-                continue  # skip strings, numbers, etc.
-
-            # 1) 优先解析 dead_action 结构
-            da = a.get("dead_action") or a.get("deadAction")
-            if isinstance(da, dict):
-                killer = da.get("killer") or {}
-                death  = da.get("death") or {}
-
-                killer_camp = killer.get("camp", killer.get("player_camp"))
-                death_camp  = death.get("camp",  death.get("player_camp"))
-
-                if _is_subtype(death, ("ACTOR_SUB_HERO", "HERO")):
-                    if killer_camp == self.main_hero_camp:
-                        my_kill += 1
-                    if death_camp == self.main_hero_camp:
-                        my_death += 1
-
-                if _is_subtype(death, ("ACTOR_SUB_SOLDIER", "SOLDIER", "MINION")):
-                    if killer_camp == self.main_hero_camp:
-                        my_last_hit += 1
-                continue  # 本条解析完，处理下一条
-
-            # 2) 兼容另一类扁平事件：type/camp/target 等
-            #    这里只做最宽松的兜底，不影响 dead_action 的主流程
-            etype = (a.get("type") or a.get("event_type") or "").lower()
-            camp  = a.get("camp") or a.get("from_camp")
-            tgt   = a.get("target") or a.get("death") or {}
-            if isinstance(tgt, dict):
-                tgt_is_hero    = _is_subtype(tgt, ("ACTOR_SUB_HERO", "HERO"))
-                tgt_is_soldier = _is_subtype(tgt, ("ACTOR_SUB_SOLDIER", "SOLDIER", "MINION"))
+    def _split_heroes(self, frame_state: Dict[str, Any]) -> Tuple[Dict, Dict]:
+        """返回 (my_hero, enemy_hero)"""
+        me, en = None, None
+        for h in frame_state.get("hero_states", []) or []:
+            c = self._camp_of_hero(h)
+            if c == self.main_hero_camp:
+                me = h
             else:
-                tgt_is_hero = tgt_is_soldier = False
+                en = h
+        return me, en
 
-            # 仅当有明确 camp 且等于我方时计入
-            if camp == self.main_hero_camp:
-                if etype in ("kill", "hero_kill") or tgt_is_hero:
-                    my_kill += 1
-                if etype in ("last_hit", "soldier_last_hit") or tgt_is_soldier:
-                    my_last_hit += 1
-            # 自身死亡有时以 'death' 标记在自己侧
-            if etype in ("death", "hero_death") and camp == self.main_hero_camp:
-                my_death += 1
+    def _collect_towers(self, frame_state: Dict[str, Any]) -> Tuple[List[Dict], List[Dict]]:
+        """收集两边全部塔对象列表 (my_towers, enemy_towers)"""
+        my_list, en_list = [], []
+        for u in frame_state.get("npc_states", []) or []:
+            if not self._is_tower(u):
+                continue
+            if u.get("camp") == self.main_hero_camp:
+                my_list.append(u)
+            else:
+                en_list.append(u)
+        return my_list, en_list
 
-        return my_kill, my_death, my_last_hit
+    def _lane_axis(self, frame_state: Dict[str, Any]) -> Tuple[float, float]:
+        """
+        用“我方塔群质心 -> 敌方塔群质心”的方向为 lane axis。
+        失败时回退为 (0,1)（朝 +z 方向）。
+        """
+        my_ts, en_ts = self._collect_towers(frame_state)
+        def centroid(lst: List[Dict]) -> Tuple[float, float]:
+            if not lst:
+                return 0.0, 0.0
+            sx = sz = 0.0
+            for t in lst:
+                x, z = self._xy_from(t)
+                sx += x; sz += z
+            n = max(1, len(lst))
+            return sx / n, sz / n
 
+        x1, z1 = centroid(my_ts)
+        x2, z2 = centroid(en_ts)
+        dx, dz = (x2 - x1), (z2 - z1)
+        n = math.hypot(dx, dz)
+        if n <= 1e-6:
+            return 0.0, 1.0
+        return dx / n, dz / n
 
-    def _frame_data_process_one_side(self, calc_map: Dict[str, RewardStruct], frame_data: Dict[str, Any], for_my_side: bool):
-        """Fill per-item current values for one side (my or enemy) in calc_map."""
-        # set camp for "my side" once
-        if for_my_side and self.main_hero_camp == -1:
-            for h in frame_data.get("hero_states", []) or []:
-                if h.get("player_id") == self.main_hero_player_id:
-                    self.main_hero_camp = (h.get("actor_state") or {}).get("camp", -1)
-                    break
+    # ======================== frame processing ======================== #
+    def _frame_data_process_one_side(self, calc_map: Dict[str, RewardStruct],
+                                     frame_state: Dict[str, Any], for_my_side: bool):
+        """
+        写入当前帧的“我方口径”数值到 calc_map 的 cur_frame_value。
+        稀疏事件：由 _read_events_from_vector() 负责。
+        """
+        # 标定阵营
+        self._identify_camps(frame_state)
 
-        # identify heroes/towers from the perspective of "my side"
-        my_hero, enemy_hero = self._get_heroes(frame_data)
-        my_tower, enemy_tower = self._get_towers(frame_data)
+        my_hero, _ = self._split_heroes(frame_state)
+        astate = self._actor_state_from_hero(my_hero)
 
-        # dense items (current absolute values)
-        my_astate = self._actor_state(my_hero)
-        calc_vals = {
-            "hp_point":        self._hp_ratio(my_astate),
-            "tower_hp_point":  self._hp_ratio(my_tower or {}),
-            "money":           self._get_gold(my_astate),
-            "ep_rate":         self._get_ep_rate(my_astate),
-            "exp":             self._get_exp(my_hero or {}),
+        # --------- dense: 当前绝对值 --------- #
+        cur_vals = {
+            "hp_point":       self._hp_ratio(astate),
+            "tower_hp_point": 0.0,  # 稍后再填（需要从 npc 直接取）
+            "money":          self._get_gold(astate),
+            "ep_rate":        self._get_ep_rate(astate),
+            "exp":            self._get_exp(my_hero),
+            "forward_progress": 0.0,  # 投影值，稍后填
         }
 
-        # sparse items (events this frame)
-        my_kill, my_death, my_last_hit = self._collect_events(frame_data)
-        calc_vals.update({
-            "kill":      float(my_kill),
-            "death":     float(my_death),
-            "last_hit":  float(my_last_hit),
+        # 我方塔血比例
+        #（直接从 npc_states 取塔对象）
+        my_towers, _ = self._collect_towers(frame_state)
+        # 没塔时置 0，有多座时取平均
+        if my_towers:
+            ratios = []
+            for t in my_towers:
+                ratios.append(self._hp_ratio(t))
+            cur_vals["tower_hp_point"] = sum(ratios) / max(1, len(ratios))
+
+        # forward_progress: 位置在 lane axis 上的投影值
+        if "forward_progress" in calc_map:
+            ux, uz = self._lane_axis(frame_state)
+            hx, hz = self._xy_from(my_hero)
+            cur_vals["forward_progress"] = hx * ux + hz * uz  # 绝对投影；奖励阶段做“本帧增量”
+
+        # --------- sparse: 本帧事件（由向量适配） --------- #
+        mk, md, mlh = self._read_events_from_vector(frame_state)
+        cur_vals.update({
+            "kill":     float(mk),
+            "death":    float(md),
+            "last_hit": float(mlh),
         })
 
-        # write into calc_map (advance last->cur)
+        # 写入：last <- cur, cur <- new
         for name, rs in calc_map.items():
             rs.last_frame_value = rs.cur_frame_value
-            rs.cur_frame_value  = float(calc_vals.get(name, 0.0))
+            rs.cur_frame_value  = float(cur_vals.get(name, 0.0))
 
-    def _frame_data_process(self, frame_data: Dict[str, Any]):
-        """Populate per-side maps for this frame."""
-        self._frame_data_process_one_side(self.m_main_calc_frame_map, frame_data, for_my_side=True)
+    def _frame_data_process(self, frame_state: Dict[str, Any]):
+        """分别按我方/敌方口径写两套 map。"""
+        # 我方
+        self._frame_data_process_one_side(self.m_main_calc_frame_map, frame_state, for_my_side=True)
 
-        # Build an "enemy-side" view: swap camps logically by flipping which hero/tower we read.
-        # Here we simply reuse the same parsers but with camp flipped when combining (see _combine_reward).
-        # For compatibility with the old pipeline, we still fill enemy map using the *enemy* hero/tower values.
-        # (We do this by temporarily swapping self.main_hero_camp)
+        # 敌方：临时翻转视角（只在读取时翻，不改 self.main_hero_camp）
         orig_camp = self.main_hero_camp
-        # try to guess enemy camp
         enemy_camp = None
-        for h in frame_data.get("hero_states", []) or []:
-            c = (h.get("actor_state") or {}).get("camp", None)
+        for h in frame_state.get("hero_states", []) or []:
+            c = self._camp_of_hero(h)
             if c is not None and c != orig_camp:
                 enemy_camp = c
                 break
-        self.main_hero_camp = enemy_camp if enemy_camp is not None else -999
-        self._frame_data_process_one_side(self.m_enemy_calc_frame_map, frame_data, for_my_side=False)
+        self.main_hero_camp = enemy_camp if enemy_camp is not None else -9999
+        self._frame_data_process_one_side(self.m_enemy_calc_frame_map, frame_state, for_my_side=False)
         self.main_hero_camp = orig_camp
 
-    # ------------------------ reward combining ------------------------ #
-    def _combine_reward(self, frame_data: Dict[str, Any], out_dict: Dict[str, float]):
-        """Combine dense (delta of advantage) and sparse (my events) into final per-item values and sum."""
-        out_dict.clear()
+    # ========================= event (vector) ========================= #
+    def _read_events_from_vector(self, frame_state: Dict[str, Any]) -> Tuple[int, int, int]:
+        """
+        从一维向量 frame_action 中读出 (kill, death, last_hit)。
+        需要在 GameConfig 中配置：
+          FRAME_ACTION_VECTOR_MAP = {"my_kill_hero":k, "my_death":k, "my_last_hit_soldier":k}
+          FRAME_ACTION_VECTOR_IS_CUMULATIVE = True/False
+          FRAME_ACTION_VECTOR_IS_BINARY     = True/False
+        """
+        fa = frame_state.get("frame_action", None)
+
+        # 首帧打印一次探针，确认形状
+        if not self._printed_probe:
+            try:
+                import numpy as np
+                shape = getattr(fa, "shape", None)
+                print(f"[reward] frame_action probe: type={type(fa)}, shape={shape}, len={len(fa) if isinstance(fa,(list,tuple)) else 'n/a'}")
+            except Exception:
+                print(f"[reward] frame_action probe: type={type(fa)}")
+            self._printed_probe = True
+
+        if fa is None:
+            return 0, 0, 0
+
+        try:
+            import numpy as np
+            if isinstance(fa, np.ndarray):
+                if fa.ndim == 0:
+                    return 0, 0, 0
+                if fa.ndim > 1:
+                    fa = fa.reshape(-1)
+            elif not isinstance(fa, (list, tuple)):
+                return 0, 0, 0
+        except Exception:
+            if not isinstance(fa, (list, tuple)):
+                return 0, 0, 0
+
+        vec = list(fa)
+        n = len(vec)
+
+        mp = getattr(GameConfig, "FRAME_ACTION_VECTOR_MAP", {})
+        if not mp:
+            return 0, 0, 0
+
+        def geti(key: str) -> int:
+            idx = mp.get(key, -1)
+            if 0 <= idx < n:
+                v = float(vec[idx])
+                if getattr(GameConfig, "FRAME_ACTION_VECTOR_IS_BINARY", False):
+                    return int(v > 0.5)
+                return int(round(v))
+            return 0
+
+        kill_c  = geti("my_kill_hero")
+        death_c = geti("my_death")
+        lh_c    = geti("my_last_hit_soldier")
+
+        if getattr(GameConfig, "FRAME_ACTION_VECTOR_IS_CUMULATIVE", True):
+            last = self._last_event_cum
+            d_k  = max(0, kill_c  - last.get("my_kill_hero", 0))
+            d_d  = max(0, death_c - last.get("my_death", 0))
+            d_lh = max(0, lh_c    - last.get("my_last_hit_soldier", 0))
+            self._last_event_cum = {
+                "my_kill_hero": kill_c,
+                "my_death": death_c,
+                "my_last_hit_soldier": lh_c,
+            }
+            return d_k, d_d, d_lh
+
+        return max(0, kill_c), max(0, death_c), max(0, lh_c)
+
+    # ======================== reward combining ======================== #
+    def _combine_reward(self, frame_state: Dict[str, Any], out: Dict[str, float]):
+        out.clear()
         reward_sum = 0.0
 
-        # Ensure only configured items are processed
-        keys = list(self.m_cur_calc_frame_map.keys())
+        # 读 forward_progress 的裁剪/上限配置
+        clip_neg = bool(getattr(GameConfig, "FORWARD_PROGRESS_CLIP_NEGATIVE", True))
+        step_cap = float(getattr(GameConfig, "FORWARD_PROGRESS_STEP_CAP", 0.0))  # 0 表示不限制
 
-        for name in keys:
-            rs_out = self.m_cur_calc_frame_map[name]
+        for name, rs_out in self.m_cur_calc_frame_map.items():
             w = rs_out.weight or 0.0
 
-            if name in self.DENSE_KEYS:
-                # advantage change = (my - enemy)_t - (my - enemy)_{t-1}
+            if name in self.ADV_DENSE:
                 my_cur  = self.m_main_calc_frame_map[name].cur_frame_value
                 en_cur  = self.m_enemy_calc_frame_map[name].cur_frame_value
                 my_last = self.m_main_calc_frame_map[name].last_frame_value
                 en_last = self.m_enemy_calc_frame_map[name].last_frame_value
                 rs_out.value = (my_cur - en_cur) - (my_last - en_last)
 
-            elif name in self.SPARSE_KEYS:
-                # my event count fired in this frame (do not subtract enemy)
+            elif name in self.SELF_DENSE:
                 my_cur  = self.m_main_calc_frame_map[name].cur_frame_value
                 my_last = self.m_main_calc_frame_map[name].last_frame_value
-                rs_out.value = my_cur - my_last  # typically 0 or 1
+                rs_out.value = my_cur - my_last
+
+                # 针对 forward_progress 的附加约束（只奖励前进、步长上限）
+                if name == "forward_progress":
+                    if clip_neg and rs_out.value < 0.0:
+                        rs_out.value = 0.0
+                    if step_cap and step_cap > 0.0:
+                        if rs_out.value > step_cap:
+                            rs_out.value = step_cap
+                        elif rs_out.value < -step_cap:
+                            rs_out.value = -step_cap
+
+            elif name in self.SPARSE:
+                my_cur  = self.m_main_calc_frame_map[name].cur_frame_value
+                my_last = self.m_main_calc_frame_map[name].last_frame_value
+                rs_out.value = my_cur - my_last  # 本帧事件数（0/1）
 
             else:
-                # unknown item -> zero
                 rs_out.value = 0.0
 
-            out_dict[name] = rs_out.value
+            out[name] = rs_out.value
             reward_sum += rs_out.value * w
 
-        out_dict["reward_sum"] = reward_sum
+        out["reward_sum"] = reward_sum
