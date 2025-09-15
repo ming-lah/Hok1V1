@@ -60,6 +60,8 @@ class Model(nn.Module):
 
         # ---------------------自注意力模块--------------------
         self.use_self_attn = bool(getattr(Config, "USE_SELF_ATTENTION", True))
+        self.memory_backbone = str(getattr(Config, "MEMORY_BACKBONE", "lstm")).lower()
+        self.use_lstm_memory = bool(getattr(Config, "USE_LSTM_MEMORY", True))
         sa_tokens  = int(getattr(Config, "SA_TOKENS", 4))   # T
         sa_dim     = int(getattr(Config, "SA_DIM", 64))     # D（需要 T * D == 256）
         sa_heads   = int(getattr(Config, "SA_HEADS", 4))
@@ -98,6 +100,17 @@ class Model(nn.Module):
             dropout=0,
             bidirectional=False,
         )
+        # Temporal fusion helpers (project 256-d shared features -> LSTM hidden, then back)
+        self.lstm_in_proj = nn.Linear(256, self.lstm_unit_size)
+        self.lstm_out_proj = nn.Linear(self.lstm_unit_size, 256)
+        self.lstm_ln = nn.LayerNorm(256)
+
+        # Memory Transformer helpers
+        self.mem_tokens = int(getattr(Config, "MEM_TOKENS", 2))
+        # map incoming two states [h|c] -> memory tokens (dim matches SA_DIM)
+        self.mem_state_to_tokens = nn.Linear(self.lstm_unit_size * 2, self.mem_tokens * int(getattr(Config, "SA_DIM", 64)))
+        # map encoded memory summary -> two states [h|c]
+        self.mem_update = nn.Linear(int(getattr(Config, "SA_DIM", 64)), self.lstm_unit_size * 2)
 
         self.label_mlp = ModuleDict(
             {
@@ -126,7 +139,7 @@ class Model(nn.Module):
         # 公共连接层
         fc_public_result = self.concat_mlp(feature_vec)
 
-        if self.use_self_attn:
+        if self.memory_backbone != 'mem_transformer' and self.use_self_attn:
             B = fc_public_result.size(0)
             # 256 → T*D → [B, T, D]
             tokens = self.attn_token_proj(fc_public_result).view(B, -1, int(getattr(Config, "SA_DIM", 64)))
@@ -135,6 +148,37 @@ class Model(nn.Module):
             pooled = tokens.mean(dim=1)                    # [B, D]
             attn_feat = self.attn_out_proj(pooled)         # [B, 256]
             fc_public_result = self.attn_ln(fc_public_result + attn_feat)  # 残差 + LN 保稳
+
+        # 记忆型 Transformer 路径：使用 [h|c] 生成记忆 tokens 与当前 tokens 一起编码
+        if self.memory_backbone == 'mem_transformer':
+            B = fc_public_result.size(0)
+            sa_dim = int(getattr(Config, "SA_DIM", 64))
+            cur_tokens = self.attn_token_proj(fc_public_result).view(B, -1, sa_dim)
+            state_cat = torch.cat([lstm_hidden_init, lstm_cell_init], dim=1)
+            mem_tokens = self.mem_state_to_tokens(state_cat).view(B, self.mem_tokens, sa_dim)
+            all_tokens = torch.cat([mem_tokens, cur_tokens], dim=1)
+            enc = self.attn_encoder(all_tokens)
+            mem_encoded = enc[:, : self.mem_tokens, :]
+            cur_encoded = enc[:, self.mem_tokens :, :]
+            pooled_cur = cur_encoded.mean(dim=1)
+            attn_feat = self.attn_out_proj(pooled_cur)
+            fc_public_result = self.attn_ln(fc_public_result + attn_feat)
+            pooled_mem = mem_encoded.mean(dim=1)
+            state_upd = self.mem_update(pooled_mem)
+            h_new, c_new = torch.split(state_upd, self.lstm_unit_size, dim=1)
+            self.lstm_hidden_output = h_new.unsqueeze(0)
+            self.lstm_cell_output = c_new.unsqueeze(0)
+
+        # Temporal memory: apply one-step LSTM over shared features
+        if self.memory_backbone == 'lstm' and bool(getattr(Config, "USE_LSTM_MEMORY", True)):
+            B = fc_public_result.size(0)
+            lstm_in = self.lstm_in_proj(fc_public_result).view(B, 1, -1)
+            lstm_out, (h_n, c_n) = self.lstm(lstm_in, (self.lstm_hidden_output, self.lstm_cell_output))
+            # Update hidden/cell for export to env and next call
+            self.lstm_hidden_output, self.lstm_cell_output = h_n, c_n
+            # Residual fuse back to 256-d shared feature
+            lstm_feat = self.lstm_out_proj(lstm_out.squeeze(1))
+            fc_public_result = self.lstm_ln(fc_public_result + lstm_feat)
 
         # output label
         # 输出标签
